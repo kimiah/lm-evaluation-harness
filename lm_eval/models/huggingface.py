@@ -1358,7 +1358,8 @@ class HFLM(TemplateLM):
                 **kwargs,
             )
 
-            cont_toks_list = cont.tolist()
+            # cont_toks_list = cont.tolist()
+            cont_toks_list = cont.sequences.tolist()
             for cont_toks, context in zip(cont_toks_list, contexts):
                 # discard context + left-padding toks if using causal decoder-only LM
                 if self.backend == "causal":
