@@ -1,3 +1,9 @@
 task: xsum
 include: unitxt
 recipe: card=cards.xsum,template=templates.summarization.abstractive.full
+repeats: 10
+generation_kwargs:
+  until: ["\n"]
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true

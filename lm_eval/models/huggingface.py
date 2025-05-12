@@ -899,7 +899,7 @@ class HFLM(TemplateLM):
             max_length=max_length,
             stopping_criteria=stopping_criteria,
             pad_token_id=self.tokenizer.pad_token_id,
-            use_cache=True,
+            # use_cache=True,
             **generation_kwargs,
         )
 
@@ -1358,8 +1358,12 @@ class HFLM(TemplateLM):
                 **kwargs,
             )
 
-            # cont_toks_list = cont.tolist()
-            cont_toks_list = cont.sequences.tolist()
+            # Handle both Tensor and Sequences output formats
+            if hasattr(cont, 'sequences'):
+                cont_toks_list = cont.sequences.tolist()
+            else:
+                cont_toks_list = cont.tolist()
+
             for cont_toks, context in zip(cont_toks_list, contexts):
                 # discard context + left-padding toks if using causal decoder-only LM
                 if self.backend == "causal":

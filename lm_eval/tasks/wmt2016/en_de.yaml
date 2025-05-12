@@ -1,11 +1,11 @@
-task: wmt-ro-en-t5-prompt
+task: wmt-en-de
 dataset_path: wmt16
-dataset_name: ro-en
+dataset_name: de-en
 training_split: train
 validation_split: validation
 output_type: generate_until
-doc_to_text: "translate English to Romanian: {{translation.en}}"
-doc_to_target: "{{translation.ro}}"
+doc_to_text: "translate the following German text to English: \nGerman text: {{translation.de}}\nEnglish text: "
+doc_to_target: "{{translation.en}}"
 metric_list:
   - metric: !function metrics.bleu
     aggregation: !function metrics.agg_bleu

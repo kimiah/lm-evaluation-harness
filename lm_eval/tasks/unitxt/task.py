@@ -30,7 +30,7 @@ _CITATION = """
 
 def assert_unitxt_installed():
     if importlib.util.find_spec("unitxt") is None:
-        raise Exception(
+        raise ModuleNotFoundError(
             "Please install unitxt via 'pip install unitxt'. For more information see: https://www.unitxt.ai/"
         )
 
@@ -56,20 +56,46 @@ class Unitxt(ConfigurableTask):
         if config is None:
             config = {}
         assert "recipe" in config, "Unitxt task must have a 'recipe' string."
-        super().__init__(
-            config={
-                "metadata": {"version": self.VERSION},
-                "dataset_name": config["recipe"],
-            }
-        )
+        
+        # Extract repeats and generation_kwargs from the original config
+        self.repeats_value = config.get("repeats", 1)
+        self.generation_kwargs = config.get("generation_kwargs", {"until": ["\n"]})
+        
+        # Create the configuration dict with all necessary parameters
+        task_config = {
+            "metadata": {"version": self.VERSION},
+            "dataset_name": config["recipe"],
+            "metric_list": [
+                {
+                    "metric": "unitxt",
+                    "aggregation": "mean",
+                    "higher_is_better": True
+                }
+            ],
+            "repeats": self.repeats_value,
+            "generation_kwargs": self.generation_kwargs
+        }
+        
+        super().__init__(config=task_config)
         self.image_decoder = datasets.Image()
         self.metrics = self.dataset["test"][0]["metrics"]
+        
+        # Track if we're doing the xsum task, used for special response handling
+        self.is_xsum_task = "xsum" in config.get("task", "")
 
     def download(self, dataset_kwargs: Optional[Dict[str, Any]] = None) -> None:
         assert_unitxt_installed()
         from unitxt import load_dataset
 
-        self.dataset = load_dataset(self.DATASET_NAME, disable_cache=False)
+        # Parse the recipe string into components
+        recipe_parts = {}
+        for part in self.DATASET_NAME.split(','):
+            key, value = part.split('=')
+            recipe_parts[key.strip()] = value.strip()
+        
+        # Load dataset using the parsed recipe
+        self.dataset = load_dataset(**recipe_parts)
+        self.metrics = self.dataset["test"][0]["metrics"]
 
     def has_training_docs(self):
         return "train" in self.dataset
@@ -99,7 +125,8 @@ class Unitxt(ConfigurableTask):
         doc["target"]
 
     def get_arguments(self, doc, ctx):
-        return (ctx, {"until": ["\n"]})
+        # Use the generation_kwargs from config for arguments
+        return (ctx, self.generation_kwargs)
 
     def fewshot_context(
         self,
@@ -109,6 +136,7 @@ class Unitxt(ConfigurableTask):
         apply_chat_template: bool = False,
         fewshot_as_multiturn: bool = False,
         chat_template: Optional[Callable] = None,
+        gen_prefix: Optional[str] = None,
     ) -> str:
         source = self.doc_to_text(doc)
         if isinstance(source, list):
@@ -134,15 +162,42 @@ class Unitxt(ConfigurableTask):
             part of the document for `doc`.
         """
         kwargs.pop("apply_chat_template", False)  # Not used by unitxt
-        return [
-            Instance(
-                request_type="generate_until",
-                doc=doc,
-                arguments=self.get_arguments(doc, ctx),
-                idx=0,
-                **kwargs,
+        
+        # Get metadata and remove it from kwargs to avoid passing it twice
+        task_name, doc_id, _ = kwargs.pop("metadata", (None, None, None))
+        
+        # For xsum, create just one instance with repeats=10 (or whatever the repeats value is)
+        # This way, we get all responses in a single request
+        if "xsum" in task_name:
+            new_metadata = (task_name, doc_id, self.repeats_value)
+            return [
+                Instance(
+                    request_type="generate_until",
+                    doc=doc,
+                    arguments=self.get_arguments(doc, ctx),
+                    idx=0,
+                    metadata=new_metadata,
+                    **kwargs,
+                )
+            ]
+        
+        # For other tasks, create multiple separate instances
+        instances = []
+        for i in range(self.repeats_value):
+            # Create a separate instance for each repeat with repeats=1
+            new_metadata = (task_name, doc_id, 1)
+            instances.append(
+                Instance(
+                    request_type="generate_until",
+                    doc=doc,
+                    arguments=self.get_arguments(doc, ctx),
+                    idx=i,  # Use different idx for each repeat
+                    metadata=new_metadata,
+                    **kwargs,
+                )
             )
-        ]
+        
+        return instances
 
     def process_results(self, doc, results):
         """Take a single document and the LM results and evaluates, returning a
@@ -154,17 +209,19 @@ class Unitxt(ConfigurableTask):
         :param results:
             The results of the requests created in construct_requests.
         """
-
-        continuation = results[0]
-
-        predictions = continuation
+        # For xsum tasks with repeats, the results might be nested
+        # Extract the first response for evaluation metrics
+        if self.is_xsum_task and isinstance(results, list) and len(results) == 1:
+            prediction = results[0][0] if results[0] else ""
+        else:
+            prediction = results[0] if results else ""
 
         references = doc
         return {
-            metric.replace("metrics.", ""): (predictions, references)
+            metric.replace("metrics.", ""): (prediction, references)
             for metric in self.metrics
         }
-
+    
     def aggregation(self):
         """
         :returns: {str: [float] -> float}
@@ -213,4 +270,10 @@ class UnitxtMultiModal(Unitxt):
         return [self.image_decoder.decode_example(image) for image in images]
 
     def get_arguments(self, doc, ctx):
-        return (ctx, {"until": ["\n"]}, {"visual": self.doc_to_image(doc)})
+        args = super().get_arguments(doc, ctx)
+        visual_args = {"visual": self.doc_to_image(doc)}
+        
+        # Check if args is a tuple with two elements (context, kwargs)
+        if isinstance(args, tuple) and len(args) == 2:
+            return (args[0], args[1], visual_args)
+        return (ctx, self.generation_kwargs, visual_args)
